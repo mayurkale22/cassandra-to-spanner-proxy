@@ -154,7 +154,7 @@ func GetSpannerColumnType(cqlType string) string {
 		return "string"
 	case "timestamp":
 		return "timestamp"
-	case "blob":
+	case "blob", "textblob":
 		return "bytes"
 	case "bigint":
 		return "int64"
@@ -215,7 +215,7 @@ func GetCassandraColumnType(choice string) (datatype.DataType, error) {
 		return datatype.Varchar, nil
 	case "timestamp":
 		return datatype.Timestamp, nil
-	case "blob":
+	case "blob", "textblob":
 		return datatype.Blob, nil
 	case "bigint":
 		return datatype.Bigint, nil

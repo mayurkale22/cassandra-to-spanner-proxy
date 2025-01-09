@@ -26,12 +26,12 @@ import (
 	"cloud.google.com/go/civil"
 	"cloud.google.com/go/spanner"
 	"cloud.google.com/go/spanner/apiv1/spannerpb"
-	"github.com/datastax/go-cassandra-native-protocol/datatype"
-	"github.com/datastax/go-cassandra-native-protocol/message"
-	"github.com/datastax/go-cassandra-native-protocol/primitive"
 	"github.com/cloudspannerecosystem/cassandra-to-spanner-proxy/tableConfig"
 	"github.com/cloudspannerecosystem/cassandra-to-spanner-proxy/third_party/datastax/proxycore"
 	"github.com/cloudspannerecosystem/cassandra-to-spanner-proxy/utilities"
+	"github.com/datastax/go-cassandra-native-protocol/datatype"
+	"github.com/datastax/go-cassandra-native-protocol/message"
+	"github.com/datastax/go-cassandra-native-protocol/primitive"
 	"go.uber.org/zap"
 )
 
@@ -45,6 +45,7 @@ const (
 	floatType        = "float"
 	doubleType       = "double"
 	timestampType    = "timestamp"
+	textBlobType     = "textblob"
 )
 
 var (
@@ -196,7 +197,11 @@ func (th *TypeHandler) BuildColumnMetadata(rowType *spannerpb.StructType,
 				return nil, nil, fmt.Errorf("unknown cassandra type for spanner timestamp - %s", cqlType)
 			}
 		case spannerpb.TypeCode_BYTES:
-			dt = datatype.Blob
+			if cqlType == textBlobType {
+				dt = datatype.Varchar
+			} else {
+				dt = datatype.Blob
+			}
 			rowFunc = th.HandleCassandraBlobType
 		case spannerpb.TypeCode_INT64:
 			switch cqlType {
@@ -329,13 +334,17 @@ func (th *TypeHandler) HandleCassandraDoubleType(i int, row *spanner.Row) ([]byt
 
 // handle encoding spanner data to cassandra blob type
 func (th *TypeHandler) HandleCassandraBlobType(i int, row *spanner.Row) ([]byte, error) {
+	print("handled blob")
 	var col []byte
 	var err error
 	if err = row.Column(i, &col); err != nil {
 		return nil, fmt.Errorf("failed to retrieve Bytes data: %v", err)
 	}
 	if col != nil {
-		return proxycore.EncodeType(datatype.Blob, th.ProtocalV, col)
+		a, _ := proxycore.EncodeType(datatype.Blob, th.ProtocalV, col)
+		println(a)
+		println(string(a))
+		return a, nil
 	}
 	return nil, err
 }
