@@ -20,12 +20,17 @@ import (
 	"crypto"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -590,7 +595,42 @@ func (c *client) GetQueryFromCache(id [16]byte) (interface{}, bool) {
 	return c.proxy.preparedQueriesCache.Load(id)
 }
 
+func (c *client) Receive2(reader io.Reader) error {
+	raw, _ := codec.DecodeRawFrame(reader)
+	c.passRequestToEndpoint(raw)
+	return nil
+}
+
+func (c *client) Receive1(reader io.Reader) error {
+	raw, err := codec.DecodeRawFrame(reader)
+	if err != nil {
+		if !errors.Is(err, io.EOF) {
+			c.proxy.logger.Error("unable to decode frame", zap.Error(err))
+		}
+		return err
+	}
+
+	body, err := codec.DecodeBody(raw.Header, bytes.NewReader(raw.Body))
+	if err != nil {
+		c.proxy.logger.Error("unable to decode body", zap.Error(err))
+		return err
+	}
+	switch msg := body.Message.(type) {
+	case *message.Options:
+		println("msg: ", msg)
+		// CC - responding with status READY
+		c.sender.Send(raw.Header, &message.Supported{Options: map[string][]string{
+			"CQL_VERSION": {"3.0.0"},
+			"COMPRESSION": {},
+		}})
+	default:
+		c.passRequestToEndpoint(raw)
+	}
+	return nil
+}
+
 func (c *client) Receive(reader io.Reader) error {
+
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
@@ -615,7 +655,7 @@ func (c *client) Receive(reader io.Reader) error {
 	case *message.Options:
 		// CC - responding with status READY
 		c.sender.Send(raw.Header, &message.Supported{Options: map[string][]string{
-			"CQL_VERSION": {c.proxy.config.CQLVersion},
+			"CQL_VERSION": {"3.4.5"},
 			"COMPRESSION": {},
 		}})
 	case *message.Startup:
@@ -1460,12 +1500,98 @@ func (c *client) handleExecuteForSelect(raw *frame.RawFrame, msg *partialExecute
 	c.sender.Send(raw.Header, result)
 }
 
+func (c *client) accessToken() string {
+	cmd := exec.Command("gcloud", "auth", "print-access-token")
+	tok, _ := cmd.CombinedOutput()
+	return strings.TrimSpace(string(tok))
+}
+
+func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
+	req, err := http.NewRequest("POST", "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions:adapter", nil)
+	if err != nil {
+		println("error: ", err)
+	}
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", c.accessToken()))
+	req.Header.Add("X-Goog-User-Project", "span-cloud-testing")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		println("error: ", err.Error())
+	}
+
+	println("Session creation status: ", resp.Status)
+	resp_body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		println("Error while reading the response bytes:", err)
+	}
+
+	var dat map[string]interface{}
+	if err := json.Unmarshal([]byte(resp_body), &dat); err != nil {
+		panic(err)
+	}
+	session := dat["name"].(string)
+	ss := strings.Split(session, "/")
+	session_last_part := ss[len(ss)-1]
+
+	buffer := bytes.Buffer{}
+	codec.EncodeHeader(raw.Header, &buffer)
+
+	byteArray := buffer.Bytes()
+	byteArray = append(byteArray, raw.Body...)
+
+	values := map[string]interface{}{"name": session, "protocol": "cassandra", "payload": byteArray}
+	jsonData, err := json.Marshal(values)
+
+	adapt_endpoint := "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions/" + session_last_part + ":adaptMessage"
+	req1, err := http.NewRequest("POST", adapt_endpoint, bytes.NewBuffer(jsonData))
+	if err != nil {
+		println("error: ", err)
+	}
+	req1.Header.Add("Authorization", fmt.Sprintf("Bearer %s", c.accessToken()))
+	req1.Header.Add("X-Goog-User-Project", "span-cloud-testing")
+
+	resp, err = http.DefaultClient.Do(req1)
+	if err != nil {
+		println("error: ", err.Error())
+	}
+	resp_body1, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		println("Error while reading the response bytes:", err, resp_body1)
+	}
+
+	println("Adapt Status: ", resp.Status)
+	println(string(resp_body1))
+
+	var adapt_resp []json.RawMessage
+	if err := json.Unmarshal(resp_body1, &adapt_resp); err != nil {
+		panic(err)
+	}
+
+	var adapt_resp_map map[string][]byte
+	if err := json.Unmarshal(adapt_resp[0], &adapt_resp_map); err != nil {
+		panic(err)
+	}
+
+	println(string(adapt_resp_map["payload"]))
+
+	h, _ := codec.DecodeHeader(bytes.NewReader(adapt_resp_map["payload"]))
+	println("header: ", h.String())
+
+	println("resp_body:", string(adapt_resp_map["payload"]))
+
+	err = c.conn.WriteBytes(adapt_resp_map["payload"])
+	if err != nil {
+		println("Err: ", err.Error())
+	}
+	return
+}
+
 func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 	startTime := time.Now()
 	c.proxy.logger.Debug("handling query", zap.String("encodedQuery", msg.query), zap.Int16("stream", raw.Header.StreamId))
 
 	handled, stmt, queryType, err := parser.IsQueryHandledWithQueryType(parser.IdentifierFromString(c.keyspace), msg.query)
-	otelCtx, span := c.proxy.otelInst.StartSpan(c.proxy.ctx, handleQuery, []attribute.KeyValue{
+	_, span := c.proxy.otelInst.StartSpan(c.proxy.ctx, handleQuery, []attribute.KeyValue{
 		attribute.String("Query", msg.query),
 	})
 	defer c.proxy.otelInst.EndSpan(span)
@@ -1479,172 +1605,11 @@ func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 			c.interceptSystemQuery(raw.Header, stmt)
 		}
 	} else {
-		var result *message.RowsResult
 		var otelErr error
 		defer recordMetrics(c.proxy.ctx, c.proxy.otelInst, handleQuery, startTime, queryType, otelErr)
 
-		switch queryType {
-		case selectType:
-			queryMetadata, err := c.proxy.translator.ToSpannerSelect(c.keyspace, msg.query)
-			if err != nil {
-				c.proxy.logger.Error(translatorErrorMessage, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
-				c.proxy.otelInst.RecordError(span, err)
-				otelErr = err
-				return
-			}
-
-			c.proxy.logger.Debug("Select raw Query", zap.String("SpannerQuery", queryMetadata.SpannerQuery))
-
-			queryMeta := responsehandler.QueryMetadata{
-				Query:           queryMetadata.SpannerQuery,
-				TableName:       queryMetadata.Table,
-				KeyspaceName:    queryMetadata.Keyspace,
-				ProtocalV:       raw.Header.Version,
-				Params:          queryMetadata.Params,
-				SelectedColumns: queryMetadata.ColumnMeta.Column,
-				PrimaryKeys:     queryMetadata.PrimaryKeys,
-			}
-
-			result, err = c.proxy.sClient.SelectStatement(otelCtx, queryMeta)
-
-			if err != nil {
-				c.proxy.logger.Error(errorAtSpanner, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
-				c.proxy.otelInst.RecordError(span, err)
-				otelErr = err
-				return
-			}
-			c.sender.Send(raw.Header, result)
-		case insertType:
-			queryMetadata, err := c.proxy.translator.ToSpannerUpsert(c.keyspace, msg.query)
-			if err != nil {
-				c.proxy.logger.Error(translatorErrorMessage, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
-				c.proxy.otelInst.RecordError(span, err)
-				otelErr = err
-				return
-			}
-
-			c.proxy.logger.Debug("Insert raw Query", zap.String("SpannerQuery", "Insert Operation use mutation"))
-
-			queryMeta := responsehandler.QueryMetadata{
-				Query:          queryMetadata.SpannerQuery,
-				TableName:      queryMetadata.Table,
-				KeyspaceName:   queryMetadata.Keyspace,
-				ProtocalV:      raw.Header.Version,
-				Params:         queryMetadata.Params,
-				Paramkeys:      queryMetadata.ParamKeys,
-				ParamValues:    queryMetadata.Values,
-				UsingTSCheck:   queryMetadata.UsingTSCheck,
-				HasIfNotExists: queryMetadata.HasIfNotExists,
-				PrimaryKeys:    queryMetadata.PrimaryKeys,
-			}
-
-			VariableMetadata, err := c.proxy.tableConfig.GetMetadataForColumns(queryMetadata.Table, queryMetadata.ParamKeys)
-			if err != nil {
-				c.proxy.logger.Error(metadataFetchError, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.ServerError{ErrorMessage: err.Error()})
-			}
-
-			result, err := c.proxy.sClient.InsertOrUpdateMutation(otelCtx, queryMeta)
-
-			if err != nil {
-				c.proxy.logger.Error(errorAtSpanner, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
-				c.proxy.otelInst.RecordError(span, err)
-				otelErr = err
-				return
-			}
-
-			result.Metadata.Columns = VariableMetadata
-			result.Metadata.ColumnCount = int32(len(VariableMetadata))
-
-			c.sender.Send(raw.Header, result)
-		case deleteType:
-			queryMetadata, err := c.proxy.translator.ToSpannerDelete(c.keyspace, msg.query)
-			if err != nil {
-				c.proxy.logger.Error(translatorErrorMessage, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
-				c.proxy.otelInst.RecordError(span, err)
-				otelErr = err
-				return
-			}
-
-			c.proxy.logger.Debug("Delete raw Query", zap.String("SpannerQuery", queryMetadata.SpannerQuery))
-
-			queryMeta := responsehandler.QueryMetadata{
-				Query:        queryMetadata.SpannerQuery,
-				TableName:    queryMetadata.Table,
-				KeyspaceName: queryMetadata.Keyspace,
-				ProtocalV:    raw.Header.Version,
-				Params:       queryMetadata.Params,
-				PrimaryKeys:  queryMetadata.PrimaryKeys,
-			}
-
-			VariableMetadata, err := c.proxy.tableConfig.GetMetadataForColumns(queryMetadata.Table, queryMetadata.PrimaryKeys)
-			if err != nil {
-				c.proxy.logger.Error(metadataFetchError, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.ServerError{ErrorMessage: err.Error()})
-			}
-
-			result, err := c.proxy.sClient.InsertUpdateOrDeleteStatement(otelCtx, queryMeta)
-			if err != nil {
-				c.proxy.logger.Error(errorAtSpanner, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
-				c.proxy.otelInst.RecordError(span, err)
-				otelErr = err
-				return
-			}
-
-			result.Metadata.Columns = VariableMetadata
-			result.Metadata.ColumnCount = int32(len(VariableMetadata))
-			c.sender.Send(raw.Header, result)
-		case updateType:
-			queryMetadata, err := c.proxy.translator.ToSpannerUpdate(c.keyspace, msg.query)
-			if err != nil {
-				c.proxy.logger.Error(translatorErrorMessage, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
-				c.proxy.otelInst.RecordError(span, err)
-				otelErr = err
-				return
-			}
-
-			c.proxy.logger.Debug("Update raw Query", zap.String("SpannerQuery", queryMetadata.SpannerQuery))
-
-			queryMeta := responsehandler.QueryMetadata{
-				Query:        queryMetadata.SpannerQuery,
-				TableName:    queryMetadata.Table,
-				KeyspaceName: queryMetadata.Keyspace,
-				ProtocalV:    raw.Header.Version,
-				Params:       queryMetadata.Params,
-				PrimaryKeys:  queryMetadata.PrimaryKeys,
-			}
-
-			VariableMetadata, err := c.proxy.tableConfig.GetMetadataForColumns(queryMetadata.Table, queryMetadata.PrimaryKeys)
-			if err != nil {
-				c.proxy.logger.Error(metadataFetchError, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.ServerError{ErrorMessage: err.Error()})
-			}
-
-			result, err := c.proxy.sClient.InsertUpdateOrDeleteStatement(otelCtx, queryMeta)
-			if err != nil {
-				c.proxy.logger.Error(errorAtSpanner, zap.String(Query, msg.query), zap.Error(err))
-				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
-				c.proxy.otelInst.RecordError(span, err)
-				otelErr = err
-				return
-			}
-
-			result.Metadata.Columns = VariableMetadata
-			result.Metadata.ColumnCount = int32(len(VariableMetadata))
-			c.sender.Send(raw.Header, result)
-		default:
-			otelErr = fmt.Errorf("invalid query type")
-			c.proxy.otelInst.RecordError(span, otelErr)
-			c.proxy.logger.Error(otelErr.Error(), zap.String(Query, msg.query))
-			return
-		}
+		println(msg.query)
+		c.passRequestToEndpoint(raw)
 	}
 }
 
@@ -1953,16 +1918,14 @@ var NewSpannerClient = func(ctx context.Context, config Config, ot *otelgo.OpenT
 			// Enable OpenTelemetry metrics before injecting meter provider.
 			spanner.EnableOpenTelemetryMetrics()
 		}
+		// Add OpenTelemetry instrumentation to Spanner client configuration
+		cfg.OpenTelemetryMeterProvider = ot.MeterProvider
+
 		// Setting the GOOGLE_API_GO_EXPERIMENTAL_TELEMETRY_PLATFORM_TRACING env varibale to 'opentelemetry' will enable traces on spanner client library.
 		os.Setenv("GOOGLE_API_GO_EXPERIMENTAL_TELEMETRY_PLATFORM_TRACING", "opentelemetry")
 
 		// Set up OpenTelemetry traces and metrics
 		otel.SetTracerProvider(ot.TracerProvider)
-
-		// Add OpenTelemetry instrumentation to Spanner client configuration
-		cfg.OpenTelemetryMeterProvider = ot.MeterProvider
-	} else {
-		// 	cfg.OpenTelemetryMeterProvider = ot.MeterProvider
 	}
 
 	database := fmt.Sprintf(SpannerConnectionString, config.SpannerConfig.GCPProjectID, config.SpannerConfig.InstanceName, config.SpannerConfig.DatabaseName)
