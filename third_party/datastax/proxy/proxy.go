@@ -595,8 +595,17 @@ func (c *client) GetQueryFromCache(id [16]byte) (interface{}, bool) {
 	return c.proxy.preparedQueriesCache.Load(id)
 }
 
-func (c *client) Receive2(reader io.Reader) error {
-	raw, _ := codec.DecodeRawFrame(reader)
+func (c *client) Receive(reader io.Reader) error {
+	raw, err := codec.DecodeRawFrame(reader)
+	if err != nil {
+		return nil
+	}
+	body, err := codec.DecodeBody(raw.Header, bytes.NewReader(raw.Body))
+	if err != nil {
+		c.proxy.logger.Error("unable to decode body", zap.Error(err))
+		return err
+	}
+	println(body.String())
 	c.passRequestToEndpoint(raw)
 	return nil
 }
@@ -629,7 +638,7 @@ func (c *client) Receive1(reader io.Reader) error {
 	return nil
 }
 
-func (c *client) Receive(reader io.Reader) error {
+func (c *client) Receive_old(reader io.Reader) error {
 
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
@@ -1506,32 +1515,40 @@ func (c *client) accessToken() string {
 	return strings.TrimSpace(string(tok))
 }
 
+var once_session = false
+var session_value = ""
+var session = ""
+
 func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
-	req, err := http.NewRequest("POST", "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions:adapter", nil)
-	if err != nil {
-		println("error: ", err)
-	}
-	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", c.accessToken()))
-	req.Header.Add("X-Goog-User-Project", "span-cloud-testing")
+	if !once_session {
+		req, err := http.NewRequest("POST", "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions:adapter", nil)
+		if err != nil {
+			println("error: ", err)
+		}
+		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", c.accessToken()))
+		req.Header.Add("X-Goog-User-Project", "span-cloud-testing")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		println("error: ", err.Error())
-	}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			println("error: ", err.Error())
+		}
 
-	println("Session creation status: ", resp.Status)
-	resp_body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		println("Error while reading the response bytes:", err)
-	}
+		println("Session creation status: ", resp.Status)
+		resp_body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			println("Error while reading the response bytes:", err)
+		}
 
-	var dat map[string]interface{}
-	if err := json.Unmarshal([]byte(resp_body), &dat); err != nil {
-		panic(err)
+		var dat map[string]interface{}
+		if err := json.Unmarshal([]byte(resp_body), &dat); err != nil {
+			panic(err)
+		}
+		session = dat["name"].(string)
+		ss := strings.Split(session, "/")
+		session_last_part := ss[len(ss)-1]
+		session_value = session_last_part
+		once_session = true
 	}
-	session := dat["name"].(string)
-	ss := strings.Split(session, "/")
-	session_last_part := ss[len(ss)-1]
 
 	buffer := bytes.Buffer{}
 	codec.EncodeHeader(raw.Header, &buffer)
@@ -1542,7 +1559,7 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 	values := map[string]interface{}{"name": session, "protocol": "cassandra", "payload": byteArray}
 	jsonData, err := json.Marshal(values)
 
-	adapt_endpoint := "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions/" + session_last_part + ":adaptMessage"
+	adapt_endpoint := "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions/" + session_value + ":adaptMessage"
 	req1, err := http.NewRequest("POST", adapt_endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		println("error: ", err)
@@ -1550,7 +1567,7 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 	req1.Header.Add("Authorization", fmt.Sprintf("Bearer %s", c.accessToken()))
 	req1.Header.Add("X-Goog-User-Project", "span-cloud-testing")
 
-	resp, err = http.DefaultClient.Do(req1)
+	resp, err := http.DefaultClient.Do(req1)
 	if err != nil {
 		println("error: ", err.Error())
 	}
