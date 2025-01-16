@@ -595,7 +595,7 @@ func (c *client) GetQueryFromCache(id [16]byte) (interface{}, bool) {
 	return c.proxy.preparedQueriesCache.Load(id)
 }
 
-func (c *client) Receive(reader io.Reader) error {
+func (c *client) Receive_endpoint(reader io.Reader) error {
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
 		return nil
@@ -610,35 +610,7 @@ func (c *client) Receive(reader io.Reader) error {
 	return nil
 }
 
-func (c *client) Receive1(reader io.Reader) error {
-	raw, err := codec.DecodeRawFrame(reader)
-	if err != nil {
-		if !errors.Is(err, io.EOF) {
-			c.proxy.logger.Error("unable to decode frame", zap.Error(err))
-		}
-		return err
-	}
-
-	body, err := codec.DecodeBody(raw.Header, bytes.NewReader(raw.Body))
-	if err != nil {
-		c.proxy.logger.Error("unable to decode body", zap.Error(err))
-		return err
-	}
-	switch msg := body.Message.(type) {
-	case *message.Options:
-		println("msg: ", msg)
-		// CC - responding with status READY
-		c.sender.Send(raw.Header, &message.Supported{Options: map[string][]string{
-			"CQL_VERSION": {"3.0.0"},
-			"COMPRESSION": {},
-		}})
-	default:
-		c.passRequestToEndpoint(raw)
-	}
-	return nil
-}
-
-func (c *client) Receive_old(reader io.Reader) error {
+func (c *client) Receive(reader io.Reader) error {
 
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
@@ -664,7 +636,7 @@ func (c *client) Receive_old(reader io.Reader) error {
 	case *message.Options:
 		// CC - responding with status READY
 		c.sender.Send(raw.Header, &message.Supported{Options: map[string][]string{
-			"CQL_VERSION": {"3.4.5"},
+			"CQL_VERSION": {"3.0.0"},
 			"COMPRESSION": {},
 		}})
 	case *message.Startup:
@@ -1589,7 +1561,17 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 		panic(err)
 	}
 
-	println(string(adapt_resp_map["payload"]))
+	println("payload: ", string(adapt_resp_map["payload"]))
+
+	r := bytes.NewReader(adapt_resp_map["payload"])
+
+	raw1, _ := codec.DecodeRawFrame(r)
+	println("raw1.header: ", raw1.Header.String())
+	body1, err := codec.DecodeBody(raw1.Header, bytes.NewReader(raw1.Body))
+	if err != nil {
+		println("unable to decode body: ", err.Error())
+	}
+	println("body1 ", body1)
 
 	h, _ := codec.DecodeHeader(bytes.NewReader(adapt_resp_map["payload"]))
 	println("header: ", h.String())
