@@ -595,7 +595,7 @@ func (c *client) GetQueryFromCache(id [16]byte) (interface{}, bool) {
 	return c.proxy.preparedQueriesCache.Load(id)
 }
 
-func (c *client) Receive_endpoint(reader io.Reader) error {
+func (c *client) Receive(reader io.Reader) error {
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
 		return nil
@@ -610,7 +610,20 @@ func (c *client) Receive_endpoint(reader io.Reader) error {
 	return nil
 }
 
-func (c *client) Receive(reader io.Reader) error {
+func (c *client) Receive_main(reader io.Reader) error {
+
+	mk := &frame.Header{
+		IsResponse: false,
+		Version:    primitive.ProtocolVersion4,
+		Flags:      0,
+		StreamId:   1,
+		OpCode:     primitive.OpCodeQuery,
+		BodyLength: 0, // will be set later when encoding
+	}
+
+	buf := bytes.Buffer{}
+	codec.EncodeHeader(mk, &buf)
+	println(buf.Bytes())
 
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
@@ -1492,6 +1505,7 @@ var session_value = ""
 var session = ""
 
 func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
+
 	if !once_session {
 		req, err := http.NewRequest("POST", "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions:adapter", nil)
 		if err != nil {
@@ -1528,6 +1542,8 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 	byteArray := buffer.Bytes()
 	byteArray = append(byteArray, raw.Body...)
 
+	println("Body: ", string(raw.Body))
+
 	values := map[string]interface{}{"name": session, "protocol": "cassandra", "payload": byteArray}
 	jsonData, err := json.Marshal(values)
 
@@ -1548,8 +1564,8 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 		println("Error while reading the response bytes:", err, resp_body1)
 	}
 
-	println("Adapt Status: ", resp.Status)
-	println(string(resp_body1))
+	//println("Adapt Status: ", resp.Status)
+	//println(string(resp_body1))
 
 	var adapt_resp []json.RawMessage
 	if err := json.Unmarshal(resp_body1, &adapt_resp); err != nil {
@@ -1561,12 +1577,12 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 		panic(err)
 	}
 
-	println("payload: ", string(adapt_resp_map["payload"]))
+	//println("payload: ", string(adapt_resp_map["payload"]))
 
 	r := bytes.NewReader(adapt_resp_map["payload"])
 
 	raw1, _ := codec.DecodeRawFrame(r)
-	println("raw1.header: ", raw1.Header.String())
+	//println("raw1.header: ", raw1.Header.String())
 	body1, err := codec.DecodeBody(raw1.Header, bytes.NewReader(raw1.Body))
 	if err != nil {
 		println("unable to decode body: ", err.Error())
