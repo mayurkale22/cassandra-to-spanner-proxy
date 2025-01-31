@@ -19,12 +19,14 @@ import (
 	"context"
 	"crypto"
 	"crypto/md5"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -595,7 +597,7 @@ func (c *client) GetQueryFromCache(id [16]byte) (interface{}, bool) {
 	return c.proxy.preparedQueriesCache.Load(id)
 }
 
-func (c *client) Receive(reader io.Reader) error {
+func (c *client) Receive_endpoint(reader io.Reader) error {
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
 		return nil
@@ -610,20 +612,7 @@ func (c *client) Receive(reader io.Reader) error {
 	return nil
 }
 
-func (c *client) Receive_main(reader io.Reader) error {
-
-	mk := &frame.Header{
-		IsResponse: false,
-		Version:    primitive.ProtocolVersion4,
-		Flags:      0,
-		StreamId:   1,
-		OpCode:     primitive.OpCodeQuery,
-		BodyLength: 0, // will be set later when encoding
-	}
-
-	buf := bytes.Buffer{}
-	codec.EncodeHeader(mk, &buf)
-	println(buf.Bytes())
+func (c *client) Receive(reader io.Reader) error {
 
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
@@ -1506,6 +1495,28 @@ var session = ""
 
 func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 
+	my_buf := &bytes.Buffer{}
+	my_buf.Write([]byte{0x04, 0x00, 0x00, 0x00, 0x07})
+
+	rr := rand.Int()
+	str := fmt.Sprintf("update users set col_bool = True where pk_int64 = %d and pk_string = 'sample_%d'", rr, rr)
+
+	println(len(str))
+	err := binary.Write(my_buf, binary.BigEndian, int32(len([]byte(str))+4))
+	if err != nil {
+		fmt.Println("Error writing to buffer:", err)
+	}
+	err = binary.Write(my_buf, binary.BigEndian, int32(len([]byte(str))))
+	if err != nil {
+		fmt.Println("Error writing to buffer:", err)
+	}
+	// data := my_buf.Bytes()
+	// fmt.Printf("%x\n", data)
+	my_buf.Write([]byte(str))
+
+	data := my_buf.Bytes()
+	fmt.Printf("%x\n", data)
+
 	if !once_session {
 		req, err := http.NewRequest("POST", "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions:adapter", nil)
 		if err != nil {
@@ -1542,9 +1553,11 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 	byteArray := buffer.Bytes()
 	byteArray = append(byteArray, raw.Body...)
 
+	fmt.Printf("%x\n", byteArray)
+
 	println("Body: ", string(raw.Body))
 
-	values := map[string]interface{}{"name": session, "protocol": "cassandra", "payload": byteArray}
+	values := map[string]interface{}{"name": session, "protocol": "cassandra", "payload": my_buf.Bytes()}
 	jsonData, err := json.Marshal(values)
 
 	adapt_endpoint := "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions/" + session_value + ":adaptMessage"
