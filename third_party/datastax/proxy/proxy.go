@@ -19,14 +19,12 @@ import (
 	"context"
 	"crypto"
 	"crypto/md5"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -684,7 +682,7 @@ func (c *client) handlePrepare(raw *frame.RawFrame, msg *message.Prepare) {
 		keyspace = msg.Keyspace
 	}
 
-	handled, stmt, queryType, err := parser.IsQueryHandledWithQueryType(parser.IdentifierFromString(keyspace), msg.Query)
+	handled, stmt, _, err := parser.IsQueryHandledWithQueryType(parser.IdentifierFromString(keyspace), msg.Query)
 	if handled {
 		if err != nil {
 			c.proxy.logger.Error("error parsing query to see if it's handled", zap.String(Query, msg.Query), zap.Error(err))
@@ -722,7 +720,7 @@ func (c *client) handlePrepare(raw *frame.RawFrame, msg *message.Prepare) {
 			}
 		}
 	} else {
-		c.handleServerPreparedQuery(raw, msg, queryType)
+		c.passRequestToEndpoint(raw)
 	}
 }
 
@@ -1011,28 +1009,7 @@ func (c *client) prepareUpdateType(raw *frame.RawFrame, msg *message.Prepare, id
 
 // handleExecute for prepared query
 func (c *client) handleExecute(raw *frame.RawFrame, msg *partialExecute, executeOptions utilities.ExecuteOptions) {
-	ctx := context.Background()
-	id := preparedIdKey(msg.queryId)
-	if preparedStmt, ok := c.GetQueryFromCache(id); ok {
-		switch st := preparedStmt.(type) {
-		case *translator.SelectQueryMap:
-			c.handleExecuteForSelect(raw, msg, st, ctx, executeOptions)
-		case *translator.InsertQueryMap:
-			c.handleExecuteForInsert(raw, msg, st, ctx)
-		case *translator.DeleteQueryMap:
-			c.handleExecuteForDelete(raw, msg, st, ctx)
-		case *translator.UpdateQueryMap:
-			c.handleExecuteForUpdate(raw, msg, st, ctx)
-		default:
-			c.proxy.logger.Error(errUnhandledPrepareExecute)
-			c.sender.Send(raw.Header, &message.ServerError{ErrorMessage: errUnhandledPrepareExecute})
-		}
-	} else if stmt, ok := c.preparedSystemQuery[id]; ok {
-		c.interceptSystemQuery(raw.Header, stmt)
-	} else {
-		c.sender.Send(raw.Header, &message.Unprepared{ErrorMessage: errQueryNotPrepared, Id: id[:]})
-		c.proxy.logger.Error(errQueryNotPrepared)
-	}
+	c.passRequestToEndpoint(raw)
 }
 
 // handle batch queries
@@ -1495,28 +1472,6 @@ var session = ""
 
 func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 
-	my_buf := &bytes.Buffer{}
-	my_buf.Write([]byte{0x04, 0x00, 0x00, 0x00, 0x07})
-
-	rr := rand.Int()
-	str := fmt.Sprintf("update users set col_bool = True where pk_int64 = %d and pk_string = 'sample_%d'", rr, rr)
-
-	println(len(str))
-	err := binary.Write(my_buf, binary.BigEndian, int32(len([]byte(str))+4))
-	if err != nil {
-		fmt.Println("Error writing to buffer:", err)
-	}
-	err = binary.Write(my_buf, binary.BigEndian, int32(len([]byte(str))))
-	if err != nil {
-		fmt.Println("Error writing to buffer:", err)
-	}
-	// data := my_buf.Bytes()
-	// fmt.Printf("%x\n", data)
-	my_buf.Write([]byte(str))
-
-	data := my_buf.Bytes()
-	fmt.Printf("%x\n", data)
-
 	if !once_session {
 		req, err := http.NewRequest("POST", "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions:adapter", nil)
 		if err != nil {
@@ -1538,7 +1493,7 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 
 		var dat map[string]interface{}
 		if err := json.Unmarshal([]byte(resp_body), &dat); err != nil {
-			panic(err)
+			println("error: ", err.Error())
 		}
 		session = dat["name"].(string)
 		ss := strings.Split(session, "/")
@@ -1553,17 +1508,17 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 	byteArray := buffer.Bytes()
 	byteArray = append(byteArray, raw.Body...)
 
-	fmt.Printf("%x\n", byteArray)
+	//fmt.Printf("%x\n", byteArray)
 
-	println("Body: ", string(raw.Body))
+	//println("Body: ", string(raw.Body))
 
-	values := map[string]interface{}{"name": session, "protocol": "cassandra", "payload": my_buf.Bytes()}
+	values := map[string]interface{}{"name": session, "protocol": "cassandra", "payload": byteArray}
 	jsonData, err := json.Marshal(values)
 
 	adapt_endpoint := "https://staging-wrenchworks.sandbox.googleapis.com/v1/projects/span-cloud-testing/instances/c2sp-devel/databases/cluster1/sessions/" + session_value + ":adaptMessage"
 	req1, err := http.NewRequest("POST", adapt_endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
-		println("error: ", err)
+		//println("error: ", err)
 	}
 	req1.Header.Add("Authorization", fmt.Sprintf("Bearer %s", c.accessToken()))
 	req1.Header.Add("X-Goog-User-Project", "span-cloud-testing")
@@ -1582,12 +1537,15 @@ func (c *client) passRequestToEndpoint(raw *frame.RawFrame) {
 
 	var adapt_resp []json.RawMessage
 	if err := json.Unmarshal(resp_body1, &adapt_resp); err != nil {
+		println("Error here: ", err.Error())
 		panic(err)
 	}
+	//println(adapt_resp[0])
 
 	var adapt_resp_map map[string][]byte
 	if err := json.Unmarshal(adapt_resp[0], &adapt_resp_map); err != nil {
-		panic(err)
+		println("Error here1: ", err.Error())
+		//panic(err)
 	}
 
 	//println("payload: ", string(adapt_resp_map["payload"]))
