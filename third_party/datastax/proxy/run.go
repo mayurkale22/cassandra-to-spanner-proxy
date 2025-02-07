@@ -41,7 +41,7 @@ var (
 	clusterReleaseversion = "4.0.0.6816"
 	defaultCqlVersion     = "3.4.5"
 	TCP_BIND_PORT         = "0.0.0.0:%s"
-	proxyReleaseVersion   = "v1.0.4"
+	proxyReleaseVersion   = "v1.0.3"
 )
 var readFile = os.ReadFile
 
@@ -57,16 +57,11 @@ type UserConfig struct {
 
 // CassandraToSpannerConfigs contains configurations for Cassandra to Spanner
 type CassandraToSpannerConfigs struct {
-	KeyspaceFlatter   bool   `yaml:"keyspaceFlatter"`
-	ProjectID         string `yaml:"projectId"`
-	ConfigTableName   string `yaml:"configTableName"`
-	UseRowTTL         bool   `yaml:"useRowTTL"`
-	UseRowTimestamp   bool   `yaml:"useRowTimestamp"`
-	Endpoint          string `yaml:"endpoint"`
-	CaCertificate     string `yaml:"caCertificate"`
-	ClientCertificate string `yaml:"clientCertificate"`
-	ClientKey         string `yaml:"clientKey"`
-	UsePlainText      bool   `yaml:"usePlainText"`
+	KeyspaceFlatter bool   `yaml:"keyspaceFlatter"`
+	ProjectID       string `yaml:"projectId"`
+	ConfigTableName string `yaml:"configTableName"`
+	UseRowTTL       bool   `yaml:"useRowTTL"`
+	UseRowTimestamp bool   `yaml:"useRowTimestamp"`
 }
 
 // OtelConfig defines the structure of the YAML configuration
@@ -87,7 +82,6 @@ type OtelConfig struct {
 		Endpoint      string  `yaml:"endpoint"`
 		SamplingRatio float64 `yaml:"samplingRatio"`
 	} `yaml:"traces"`
-	DisableRandomServiceInstanceIDKey bool `yaml:"disableRandomServiceInstanceIDKey"`
 }
 
 // Listener represents each listener configuration
@@ -322,20 +316,15 @@ func Run(ctx context.Context, args []string) int {
 				MaxCommitDelay:   uint64(listener.Spanner.Operation.MaxCommitDelay),
 				ReplayProtection: listener.Spanner.Operation.ReplayProtection,
 			},
-			Partitioner:       partitioner,
-			ReleaseVersion:    releaseVersion,
-			CQLVersion:        cqlVersion,
-			OtelConfig:        UserConfig.Otel,
-			KeyspaceFlatter:   UserConfig.CassandraToSpannerConfigs.KeyspaceFlatter,
-			UseRowTimestamp:   UserConfig.CassandraToSpannerConfigs.UseRowTimestamp,
-			UseRowTTL:         UserConfig.CassandraToSpannerConfigs.UseRowTTL,
-			Debug:             cfg.Debug,
-			UserAgent:         "cassandra-adapter/" + proxyReleaseVersion,
-			Endpoint:          UserConfig.CassandraToSpannerConfigs.Endpoint,
-			CaCertificate:     UserConfig.CassandraToSpannerConfigs.CaCertificate,
-			ClientCertificate: UserConfig.CassandraToSpannerConfigs.ClientCertificate,
-			ClientKey:         UserConfig.CassandraToSpannerConfigs.ClientKey,
-			UsePlainText:      UserConfig.CassandraToSpannerConfigs.UsePlainText,
+			Partitioner:     partitioner,
+			ReleaseVersion:  releaseVersion,
+			CQLVersion:      cqlVersion,
+			OtelConfig:      UserConfig.Otel,
+			KeyspaceFlatter: UserConfig.CassandraToSpannerConfigs.KeyspaceFlatter,
+			UseRowTimestamp: UserConfig.CassandraToSpannerConfigs.UseRowTimestamp,
+			UseRowTTL:       UserConfig.CassandraToSpannerConfigs.UseRowTTL,
+			Debug:           cfg.Debug,
+			UserAgent:       "cassandra-adapter/" + proxyReleaseVersion,
 		})
 
 		if err1 != nil {

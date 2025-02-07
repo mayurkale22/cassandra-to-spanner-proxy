@@ -49,7 +49,6 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -138,17 +137,12 @@ type Config struct {
 	CQLVersion        string
 	// PreparedCache a cache that stores prepared queries. If not set it uses the default implementation with a max
 	// capacity of ~100MB.
-	PreparedCache     proxycore.PreparedCache
-	KeyspaceFlatter   bool
-	UseRowTimestamp   bool
-	UseRowTTL         bool
-	Debug             bool
-	UserAgent         string
-	Endpoint          string
-	CaCertificate     string
-	ClientCertificate string
-	ClientKey         string
-	UsePlainText      bool
+	PreparedCache   proxycore.PreparedCache
+	KeyspaceFlatter bool
+	UseRowTimestamp bool
+	UseRowTTL       bool
+	Debug           bool
+	UserAgent       string
 }
 
 type SpannerConfig struct {
@@ -228,19 +222,18 @@ func NewProxy(ctx context.Context, config Config) (*Proxy, error) {
 	// Initialize OpenTelemetry
 	if config.OtelConfig.Enabled {
 		otelInit = &otelgo.OTelConfig{
-			TraceEnabled:                      config.OtelConfig.Traces.Enabled,
-			MetricEnabled:                     config.OtelConfig.Metrics.Enabled,
-			TracerEndpoint:                    config.OtelConfig.Traces.Endpoint,
-			MetricEndpoint:                    config.OtelConfig.Metrics.Endpoint,
-			ServiceName:                       config.OtelConfig.ServiceName,
-			OTELEnabled:                       config.OtelConfig.Enabled,
-			TraceSampleRatio:                  config.OtelConfig.Traces.SamplingRatio,
-			Database:                          config.SpannerConfig.DatabaseName,
-			Instance:                          config.SpannerConfig.InstanceName,
-			HealthCheckEnabled:                config.OtelConfig.HealthCheck.Enabled,
-			HealthCheckEp:                     config.OtelConfig.HealthCheck.Endpoint,
-			ServiceVersion:                    config.Version.String(),
-			DisableRandomServiceInstanceIDKey: config.OtelConfig.DisableRandomServiceInstanceIDKey,
+			TraceEnabled:       config.OtelConfig.Traces.Enabled,
+			MetricEnabled:      config.OtelConfig.Metrics.Enabled,
+			TracerEndpoint:     config.OtelConfig.Traces.Endpoint,
+			MetricEndpoint:     config.OtelConfig.Metrics.Endpoint,
+			ServiceName:        config.OtelConfig.ServiceName,
+			OTELEnabled:        config.OtelConfig.Enabled,
+			TraceSampleRatio:   config.OtelConfig.Traces.SamplingRatio,
+			Database:           config.SpannerConfig.DatabaseName,
+			Instance:           config.SpannerConfig.InstanceName,
+			HealthCheckEnabled: config.OtelConfig.HealthCheck.Enabled,
+			HealthCheckEp:      config.OtelConfig.HealthCheck.Endpoint,
+			ServiceVersion:     config.Version.String(),
 		}
 
 		otelInst, shutdownOTel, err = otelgo.NewOpenTelemetry(ctx, otelInit, config.Logger)
@@ -1032,7 +1025,10 @@ func (c *client) handleBatch(raw *frame.RawFrame, msg *partialBatch) {
 	})
 	defer c.proxy.otelInst.EndSpan(span)
 	var otelErr error
-	defer recordMetrics(c.proxy.ctx, c.proxy.otelInst, handleBatch, startTime, handleBatch, otelErr)
+	var spannerAPI string
+	defer func() {
+		recordMetrics(c.proxy.ctx, c.proxy.otelInst, handleBatch, startTime, handleBatch, spannerAPI, otelErr)
+	}()
 
 	for index, queryId := range msg.queryOrIds {
 		queryOrId, ok := queryId.([]byte)
@@ -1099,7 +1095,8 @@ func (c *client) handleBatch(raw *frame.RawFrame, msg *partialBatch) {
 			c.proxy.logger.Error(otelErr.Error())
 		}
 	}
-	result, err := c.proxy.sClient.FilterAndExecuteBatch(otelCtx, batchQueries)
+	result, batchSpannerAPI, err := c.proxy.sClient.FilterAndExecuteBatch(otelCtx, batchQueries)
+	spannerAPI = batchSpannerAPI
 	if err != nil {
 		c.proxy.logger.Error(errorAtSpanner, zap.Error(err))
 		c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
@@ -1116,12 +1113,15 @@ func (c *client) handleExecuteForUpdate(raw *frame.RawFrame, msg *partialExecute
 	startTime := time.Now()
 	var result *message.RowsResult
 	var otelErr error
+	var spannerAPI string
 	ctx, span := c.proxy.otelInst.StartSpan(ctx, updateType, []attribute.KeyValue{
 		attribute.String(cassandraQuery, st.CassandraQuery),
 		attribute.String(spannerQuery, st.SpannerQuery),
 	})
 	defer c.proxy.otelInst.EndSpan(span)
-	defer recordMetrics(ctx, c.proxy.otelInst, handleExecuteForUpdate, startTime, updateType, otelErr)
+	defer func() {
+		defer recordMetrics(ctx, c.proxy.otelInst, handleExecuteForUpdate, startTime, updateType, spannerAPI, otelErr)
+	}()
 
 	queryMetadata, err := c.prepareUpdateQueryMetadata(raw, msg.PositionalValues, st)
 	if err != nil {
@@ -1138,7 +1138,7 @@ func (c *client) handleExecuteForUpdate(raw *frame.RawFrame, msg *partialExecute
 		queryMetadata.SelectQueryMapUpdate = st.SelectQueryMapUpdate
 		queryMetadata.UpdateSetValues = st.UpdateSetValues
 
-		result, err = c.proxy.sClient.UpdateMapByKey(ctx, *queryMetadata)
+		result, spannerAPI, err = c.proxy.sClient.UpdateMapByKey(ctx, *queryMetadata)
 		if err != nil {
 			c.proxy.logger.Error(fmt.Sprintf("Error while performing map update by key - Query -> %s <-", st.CassandraQuery), zap.Error(err))
 			c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
@@ -1147,8 +1147,9 @@ func (c *client) handleExecuteForUpdate(raw *frame.RawFrame, msg *partialExecute
 			return
 		}
 	} else {
-		result, err = c.proxy.sClient.InsertUpdateOrDeleteStatement(ctx, *queryMetadata)
+		result, spannerAPI, err = c.proxy.sClient.InsertUpdateOrDeleteStatement(ctx, *queryMetadata)
 	}
+
 	otelgo.AddAnnotation(ctx, spannerExecutionDoneEvent)
 	if err != nil {
 		c.proxy.logger.Error(errorAtSpanner, zap.String(Query, st.CassandraQuery), zap.Error(err))
@@ -1164,12 +1165,15 @@ func (c *client) handleExecuteForUpdate(raw *frame.RawFrame, msg *partialExecute
 func (c *client) handleExecuteForDelete(raw *frame.RawFrame, msg *partialExecute, st *translator.DeleteQueryMap, ctx context.Context) {
 	start := time.Now()
 	var otelErr error
+	var spannerAPI string
 	ctx, span := c.proxy.otelInst.StartSpan(ctx, deleteType, []attribute.KeyValue{
 		attribute.String(cassandraQuery, st.CassandraQuery),
 		attribute.String(spannerQuery, st.SpannerQuery),
 	})
 	defer c.proxy.otelInst.EndSpan(span)
-	defer recordMetrics(ctx, c.proxy.otelInst, handleExecuteForDelete, start, deleteType, otelErr)
+	defer func() {
+		recordMetrics(ctx, c.proxy.otelInst, handleExecuteForDelete, start, deleteType, spannerAPI, otelErr)
+	}()
 
 	queryMetadata, executeByMutation, err := c.prepareDeleteQueryMetadata(raw, msg.PositionalValues, st)
 	if err != nil {
@@ -1182,9 +1186,10 @@ func (c *client) handleExecuteForDelete(raw *frame.RawFrame, msg *partialExecute
 	otelgo.AddAnnotation(ctx, executingSpannerRequestEvent)
 	var result *message.RowsResult
 	if !executeByMutation {
-		result, err = c.proxy.sClient.InsertUpdateOrDeleteStatement(ctx, *queryMetadata)
+		result, spannerAPI, err = c.proxy.sClient.InsertUpdateOrDeleteStatement(ctx, *queryMetadata)
 	} else {
-		result, err = c.proxy.sClient.DeleteUsingMutations(ctx, *queryMetadata)
+		result, spannerAPI, err = c.proxy.sClient.DeleteUsingMutations(ctx, *queryMetadata)
+
 	}
 	otelgo.AddAnnotation(ctx, spannerExecutionDoneEvent)
 
@@ -1202,12 +1207,15 @@ func (c *client) handleExecuteForDelete(raw *frame.RawFrame, msg *partialExecute
 func (c *client) handleExecuteForInsert(raw *frame.RawFrame, msg *partialExecute, st *translator.InsertQueryMap, ctx context.Context) {
 	startTime := time.Now()
 	var otelErr error
+	var spannerAPI string
 	ctx, span := c.proxy.otelInst.StartSpan(ctx, insertType, []attribute.KeyValue{
 		attribute.String(cassandraQuery, st.CassandraQuery),
 		attribute.String(spannerQuery, st.SpannerQuery),
 	})
 	defer c.proxy.otelInst.EndSpan(span)
-	defer recordMetrics(ctx, c.proxy.otelInst, handleExecuteForInsert, startTime, insertType, otelErr)
+	defer func() {
+		recordMetrics(ctx, c.proxy.otelInst, handleExecuteForInsert, startTime, insertType, spannerAPI, otelErr)
+	}()
 
 	queryMetadata, err := c.prepareInsertQueryMetadata(raw, msg.PositionalValues, st)
 	if err != nil {
@@ -1218,7 +1226,9 @@ func (c *client) handleExecuteForInsert(raw *frame.RawFrame, msg *partialExecute
 		return
 	}
 	otelgo.AddAnnotation(ctx, executingSpannerRequestEvent)
-	result, err := c.proxy.sClient.InsertOrUpdateMutation(ctx, *queryMetadata)
+	result, insertAPI, err := c.proxy.sClient.InsertOrUpdateMutation(ctx, *queryMetadata)
+	spannerAPI = insertAPI
+
 	otelgo.AddAnnotation(ctx, spannerExecutionDoneEvent)
 
 	if err != nil {
@@ -1420,12 +1430,15 @@ func (c *client) handleExecuteForSelect(raw *frame.RawFrame, msg *partialExecute
 	var query responsehandler.QueryMetadata
 	var err error
 	var result *message.RowsResult
+	var spannerAPI string
 	ctx, span := c.proxy.otelInst.StartSpan(ctx, selectType, []attribute.KeyValue{
 		attribute.String(cassandraQuery, st.CassandraQuery),
 		attribute.String(spannerQuery, st.SpannerQuery),
 	})
 	defer c.proxy.otelInst.EndSpan(span)
-	defer recordMetrics(c.proxy.ctx, c.proxy.otelInst, handleExecuteForSelect, startTime, selectType, err)
+	defer func() {
+		recordMetrics(c.proxy.ctx, c.proxy.otelInst, handleExecuteForSelect, startTime, selectType, spannerAPI, err)
+	}()
 
 	// Get Decoded parameters
 	otelgo.AddAnnotation(ctx, "Decoding Bytes To Spanner Column Type")
@@ -1457,7 +1470,7 @@ func (c *client) handleExecuteForSelect(raw *frame.RawFrame, msg *partialExecute
 	}
 
 	otelgo.AddAnnotation(ctx, executingSpannerRequestEvent)
-	result, err = c.proxy.sClient.SelectStatement(ctx, query)
+	result, spannerAPI, err = c.proxy.sClient.SelectStatement(ctx, query)
 	otelgo.AddAnnotation(ctx, spannerExecutionDoneEvent)
 
 	if err != nil {
@@ -1470,6 +1483,8 @@ func (c *client) handleExecuteForSelect(raw *frame.RawFrame, msg *partialExecute
 }
 
 func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
+	var otelErr error
+	var spannerAPI string
 	startTime := time.Now()
 	c.proxy.logger.Debug("handling query", zap.String("encodedQuery", msg.query), zap.Int16("stream", raw.Header.StreamId))
 
@@ -1478,6 +1493,9 @@ func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 		attribute.String("Query", msg.query),
 	})
 	defer c.proxy.otelInst.EndSpan(span)
+	defer func() {
+		recordMetrics(c.proxy.ctx, c.proxy.otelInst, handleQuery, startTime, queryType, spannerAPI, otelErr)
+	}()
 	if handled {
 		if err != nil {
 			c.proxy.logger.Error("error parsing query to see if it's handled", zap.String(Query, msg.query), zap.Error(err))
@@ -1489,8 +1507,6 @@ func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 		}
 	} else {
 		var result *message.RowsResult
-		var otelErr error
-		defer recordMetrics(c.proxy.ctx, c.proxy.otelInst, handleQuery, startTime, queryType, otelErr)
 
 		switch queryType {
 		case selectType:
@@ -1515,7 +1531,7 @@ func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 				PrimaryKeys:     queryMetadata.PrimaryKeys,
 			}
 
-			result, err = c.proxy.sClient.SelectStatement(otelCtx, queryMeta)
+			result, spannerAPI, err = c.proxy.sClient.SelectStatement(otelCtx, queryMeta)
 
 			if err != nil {
 				c.proxy.logger.Error(errorAtSpanner, zap.String(Query, msg.query), zap.Error(err))
@@ -1556,7 +1572,7 @@ func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 				c.sender.Send(raw.Header, &message.ServerError{ErrorMessage: err.Error()})
 			}
 
-			result, err := c.proxy.sClient.InsertOrUpdateMutation(otelCtx, queryMeta)
+			result, spannerAPI, err = c.proxy.sClient.InsertOrUpdateMutation(otelCtx, queryMeta)
 
 			if err != nil {
 				c.proxy.logger.Error(errorAtSpanner, zap.String(Query, msg.query), zap.Error(err))
@@ -1597,7 +1613,7 @@ func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 				c.sender.Send(raw.Header, &message.ServerError{ErrorMessage: err.Error()})
 			}
 
-			result, err := c.proxy.sClient.InsertUpdateOrDeleteStatement(otelCtx, queryMeta)
+			result, spannerAPI, err = c.proxy.sClient.InsertUpdateOrDeleteStatement(otelCtx, queryMeta)
 			if err != nil {
 				c.proxy.logger.Error(errorAtSpanner, zap.String(Query, msg.query), zap.Error(err))
 				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
@@ -1636,7 +1652,8 @@ func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 				c.sender.Send(raw.Header, &message.ServerError{ErrorMessage: err.Error()})
 			}
 
-			result, err := c.proxy.sClient.InsertUpdateOrDeleteStatement(otelCtx, queryMeta)
+			result, spannerAPI, err = c.proxy.sClient.InsertUpdateOrDeleteStatement(otelCtx, queryMeta)
+
 			if err != nil {
 				c.proxy.logger.Error(errorAtSpanner, zap.String(Query, msg.query), zap.Error(err))
 				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: err.Error()})
@@ -1977,30 +1994,10 @@ var NewSpannerClient = func(ctx context.Context, config Config, ot *otelgo.OpenT
 	}
 
 	database := fmt.Sprintf(SpannerConnectionString, config.SpannerConfig.GCPProjectID, config.SpannerConfig.InstanceName, config.SpannerConfig.DatabaseName)
-
-	opts := []option.ClientOption{
+	client, err := spanner.NewClientWithConfig(ctx, database,
+		cfg,
 		option.WithGRPCConnectionPool(config.SpannerConfig.NumOfChannels),
-		option.WithGRPCDialOption(pool),
-	}
-
-	if config.Endpoint != "" {
-		config.Logger.Info("Using Spanner endpoint: " + config.Endpoint)
-		opts = append(opts, option.WithEndpoint(config.Endpoint))
-		if config.UsePlainText {
-			opts = append(opts, option.WithoutAuthentication())
-			opts = append(opts, option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
-		} else {
-			creds, credsErr := utilities.NewCred(config.CaCertificate, config.ClientCertificate, config.ClientKey)
-			if credsErr != nil {
-				config.Logger.Error(credsErr.Error())
-				return nil
-			}
-			opts = append(opts, option.WithGRPCDialOption(grpc.WithTransportCredentials(creds)))
-		}
-	}
-
-	client, err := spanner.NewClientWithConfig(ctx, database, cfg, opts...)
-
+		option.WithGRPCDialOption(pool))
 	// Create the Spanner client
 	if err != nil {
 		config.Logger.Error("Failed to create client" + err.Error())
@@ -2015,18 +2012,20 @@ var NewSpannerClient = func(ctx context.Context, config Config, ot *otelgo.OpenT
 
 // Function to records otel metrics on otel
 // Metrics: 1. request count; 2. latency
-func recordMetrics(ctx context.Context, o *otelgo.OpenTelemetry, method string, start time.Time, queryType string, err error) {
+func recordMetrics(ctx context.Context, o *otelgo.OpenTelemetry, method string, start time.Time, queryType string, spannerAPI string, err error) {
 	status := "OK"
 	if err != nil {
 		status = "failure"
 	}
 	o.RecordRequestCountMetric(ctx, otelgo.Attributes{
-		Method:    method,
-		Status:    status,
-		QueryType: queryType,
+		Method:     method,
+		Status:     status,
+		QueryType:  queryType,
+		SpannerAPI: spannerAPI,
 	})
 	o.RecordLatencyMetric(ctx, start, otelgo.Attributes{
-		Method:    method,
-		QueryType: queryType,
+		Method:     method,
+		QueryType:  queryType,
+		SpannerAPI: spannerAPI,
 	})
 }

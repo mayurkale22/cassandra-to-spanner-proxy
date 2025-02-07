@@ -27,8 +27,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	prom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -36,20 +36,24 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Attributes struct {
-	Method    string
-	Status    string
-	QueryType string
+	Method     string
+	Status     string
+	QueryType  string
+	SpannerAPI string
 }
 
 var (
-	attributeKeyDatabase  = attribute.Key("database")
-	attributeKeyMethod    = attribute.Key("method")
-	attributeKeyStatus    = attribute.Key("status")
-	attributeKeyInstance  = attribute.Key("instance")
-	attributeKeyQueryType = attribute.Key("query_type")
+	attributeKeyDatabase   = attribute.Key("database")
+	attributeKeyMethod     = attribute.Key("method")
+	attributeKeyStatus     = attribute.Key("status")
+	attributeKeyInstance   = attribute.Key("instance")
+	attributeKeyQueryType  = attribute.Key("query_type")
+	attributeKeySpannerAPI = attribute.Key("spanner_api")
 )
 
 // TracerProvider defines the interface for creating traces.
@@ -113,6 +117,13 @@ func NewOpenTelemetry(ctx context.Context, config *OTelConfig, logger *zap.Logge
 		return otelInst, nil, nil
 	}
 
+	go func() {
+		for {
+			http.Handle("/metrics1", promhttp.Handler())
+			http.ListenAndServe(":2113", nil)
+		}
+	}()
+
 	// Construct attributes for Metrics
 	attributeMap := []attribute.KeyValue{
 		attributeKeyInstance.String(config.Instance),
@@ -145,7 +156,7 @@ func NewOpenTelemetry(ctx context.Context, config *OTelConfig, logger *zap.Logge
 	}
 	otelInst.Tracer = otel.GetTracerProvider().Tracer(config.ServiceName)
 
-	if config.MetricEnabled {
+	if true {
 		// Initialize MeterProvider
 		otelInst.MeterProvider, err = otelInst.InitMeterProvider(ctx, resource)
 		if err != nil {
@@ -222,10 +233,7 @@ func (o *OpenTelemetry) InitTracerProvider(ctx context.Context, resource *resour
 // exporting metrics from your application to an OpenTelemetry Collector or directly to a backend that supports OTLP over gRPC for metrics.
 func (o *OpenTelemetry) InitMeterProvider(ctx context.Context, resource *resource.Resource) (*sdkmetric.MeterProvider, error) {
 	var views []sdkmetric.View
-	me, err := otlpmetricgrpc.New(ctx,
-		otlpmetricgrpc.WithEndpoint(o.Config.MetricEndpoint),
-		otlpmetricgrpc.WithInsecure(),
-	)
+	me, err := prom.New()
 	if err != nil {
 		o.Logger.Error("error while initializing the meter", zap.Error(err))
 		return nil, err
@@ -239,7 +247,7 @@ func (o *OpenTelemetry) InitMeterProvider(ctx context.Context, resource *resourc
 		)}
 
 	mp := sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(me)),
+		sdkmetric.WithReader(me),
 		sdkmetric.WithResource(resource),
 		sdkmetric.WithView(views...),
 	)
@@ -331,6 +339,7 @@ func (o *OpenTelemetry) RecordLatencyMetric(ctx context.Context, duration time.T
 	attr := o.attributeMap
 	attr = append(attr, attributeKeyMethod.String(attrs.Method))
 	attr = append(attr, attributeKeyQueryType.String(attrs.QueryType))
+	attr = append(attr, attributeKeySpannerAPI.String(attrs.SpannerAPI))
 	o.requestLatency.Record(ctx, int64(time.Since(duration).Milliseconds()), metric.WithAttributes(attr...))
 }
 
@@ -344,6 +353,7 @@ func (o *OpenTelemetry) RecordRequestCountMetric(ctx context.Context, attrs Attr
 	attr = append(attr, attributeKeyMethod.String(attrs.Method))
 	attr = append(attr, attributeKeyQueryType.String(attrs.QueryType))
 	attr = append(attr, attributeKeyStatus.String(attrs.Status))
+	attr = append(attr, attributeKeySpannerAPI.String(attrs.SpannerAPI))
 	o.requestCount.Add(ctx, 1, metric.WithAttributes(attr...))
 }
 
