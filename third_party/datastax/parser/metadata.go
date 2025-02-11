@@ -134,7 +134,6 @@ var (
 
 var SystemColumnsByName = map[string][]*message.ColumnMetadata{
 	"local":                 SystemLocalColumns,
-	"peers":                 SystemPeersColumns,
 	"schema_keyspaces":      SystemSchemaKeyspaces,
 	"schema_columnfamilies": SystemSchemaColumnFamilies,
 	"schema_columns":        SystemSchemaColumns,

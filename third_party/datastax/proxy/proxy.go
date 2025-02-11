@@ -595,7 +595,7 @@ func (c *client) GetQueryFromCache(id [16]byte) (interface{}, bool) {
 	return c.proxy.preparedQueriesCache.Load(id)
 }
 
-func (c *client) Receive_endpoint(reader io.Reader) error {
+func (c *client) Receive_main(reader io.Reader) error {
 	raw, err := codec.DecodeRawFrame(reader)
 	if err != nil {
 		return nil
@@ -606,6 +606,7 @@ func (c *client) Receive_endpoint(reader io.Reader) error {
 		return err
 	}
 	println(body.String())
+
 	c.passRequestToEndpoint(raw)
 	return nil
 }
@@ -1581,6 +1582,7 @@ func (c *client) handleQuery(raw *frame.RawFrame, msg *partialQuery) {
 		attribute.String("Query", msg.query),
 	})
 	defer c.proxy.otelInst.EndSpan(span)
+
 	if handled {
 		if err != nil {
 			c.proxy.logger.Error("error parsing query to see if it's handled", zap.String(Query, msg.query), zap.Error(err))
@@ -1732,7 +1734,7 @@ func (c *client) interceptSystemQuery(hdr *frame.Header, stmt interface{}) {
 					Data: []message.Row{row},
 				})
 			}
-		} else if s.Table == "peers" {
+		} else if s.Table == "peers1" {
 			peersColumns := parser.SystemPeersColumns
 			if len(c.proxy.cluster.Info.DSEVersion) > 0 {
 				peersColumns = parser.DseSystemPeersColumns
@@ -1772,7 +1774,8 @@ func (c *client) interceptSystemQuery(hdr *frame.Header, stmt interface{}) {
 				},
 			})
 		} else {
-			c.sender.Send(hdr, &message.Invalid{ErrorMessage: "Doesn't exist"})
+			println("*** here ***")
+			c.sender.Send(hdr, &message.ServerError{ErrorMessage: "Doesn't exist"})
 		}
 	case *parser.UseStatement:
 		c.keyspace = s.Keyspace
