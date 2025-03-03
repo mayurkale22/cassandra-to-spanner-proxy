@@ -65,6 +65,7 @@ var rowsResult = message.RowsResult{
 
 const (
 	InsertUpdateOrDeleteStatement = "Calling DML Statement"
+	DeleteUsingPartitionedDML     = "Calling Partitioned DML"
 	InsertOrUpdateMutation        = "Calling Insert or Update Using Mutations"
 	DeleteUsingMutations          = "Calling Delete Using Mutations"
 	FilterAndExecuteBatch         = "Filter And Execute Batch"
@@ -83,6 +84,7 @@ const (
 type SpannerClientIface interface {
 	SelectStatement(ctx context.Context, query responsehandler.QueryMetadata) (*message.RowsResult, string, error)
 	InsertUpdateOrDeleteStatement(ctx context.Context, query responsehandler.QueryMetadata) (*message.RowsResult, string, error)
+	DeleteUsingPartitionedDML(ctx context.Context, query responsehandler.QueryMetadata) (*message.RowsResult, string, error)
 	Close() error
 	InsertOrUpdateMutation(ctx context.Context, query responsehandler.QueryMetadata) (*message.RowsResult, string, error)
 	DeleteUsingMutations(ctx context.Context, query responsehandler.QueryMetadata) (*message.RowsResult, string, error)
@@ -226,6 +228,13 @@ func (sc *SpannerClient) InsertUpdateOrDeleteStatement(ctx context.Context, quer
 		return nil
 	}, spanner.TransactionOptions{CommitOptions: sc.BuildCommitOptions()})
 
+	return &rowsResult, ExecuteStreamingSqlAPI, err
+}
+
+func (sc *SpannerClient) DeleteUsingPartitionedDML(ctx context.Context, query responsehandler.QueryMetadata) (*message.RowsResult, string, error) {
+	println("****** calling pdml")
+	otelgo.AddAnnotation(ctx, DeleteUsingPartitionedDML)
+	_, err := sc.Client.PartitionedUpdate(ctx, *buildStmt(&query))
 	return &rowsResult, ExecuteStreamingSqlAPI, err
 }
 
@@ -898,6 +907,7 @@ func (sc *SpannerClient) prepareStatement(ctx context.Context, txn *spanner.Read
 
 // buildStmt returns a Statement with the given SQL and Params.
 func buildStmt(query *responsehandler.QueryMetadata) *spanner.Statement {
+	println(query.Query)
 	return &spanner.Statement{
 		SQL:    query.Query,
 		Params: query.Params,

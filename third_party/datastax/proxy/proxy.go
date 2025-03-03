@@ -80,13 +80,14 @@ var ErrProxyAlreadyConnected = errors.New("proxy already connected")
 var ErrProxyNotConnected = errors.New("proxy not connected")
 
 var (
-	system_schema         = "system_schema"
-	keyspaces             = "keyspaces"
-	tables                = "tables"
-	columns               = "columns"
-	system_virtual_schema = "system_virtual_schema"
-	local                 = "local"
-	spannerMaxStaleness   = "spanner_maxstaleness"
+	system_schema            = "system_schema"
+	keyspaces                = "keyspaces"
+	tables                   = "tables"
+	columns                  = "columns"
+	system_virtual_schema    = "system_virtual_schema"
+	local                    = "local"
+	spannerMaxStaleness      = "spanner_maxstaleness"
+	spannerUsePartitioneddml = "spanner_use_partitioned_dml"
 )
 
 const selectType = "select"
@@ -641,16 +642,19 @@ func (c *client) Receive(reader io.Reader) error {
 		c.proxy.logger.Debug("Prepare block -", zap.String(Query, msg.Query))
 		c.handlePrepare(raw, msg)
 	case *partialExecute:
+		var maxStaleness int64 = 0
+		var usePartitionedDml bool = false
 		if bytes, found := body.CustomPayload[spannerMaxStaleness]; found {
-			maxStaleness, err := utilities.ParseDurationToSeconds(string(bytes))
+			maxStaleness, err = utilities.ParseDurationToSeconds(string(bytes))
 			if err != nil {
 				c.sender.Send(raw.Header, &message.Invalid{ErrorMessage: errorStaleReadDecoding})
 				return nil
 			}
-			c.handleExecute(raw, msg, utilities.ExecuteOptions{MaxStaleness: maxStaleness})
-		} else {
-			c.handleExecute(raw, msg, utilities.ExecuteOptions{MaxStaleness: 0})
 		}
+		if _, found := body.CustomPayload[spannerUsePartitioneddml]; found {
+			usePartitionedDml = true
+		}
+		c.handleExecute(raw, msg, utilities.ExecuteOptions{MaxStaleness: maxStaleness, UsePartitionedDml: usePartitionedDml})
 	case *partialQuery:
 		c.handleQuery(raw, msg)
 	case *partialBatch:
@@ -1006,7 +1010,7 @@ func (c *client) handleExecute(raw *frame.RawFrame, msg *partialExecute, execute
 		case *translator.InsertQueryMap:
 			c.handleExecuteForInsert(raw, msg, st, ctx)
 		case *translator.DeleteQueryMap:
-			c.handleExecuteForDelete(raw, msg, st, ctx)
+			c.handleExecuteForDelete(raw, msg, st, ctx, executeOptions)
 		case *translator.UpdateQueryMap:
 			c.handleExecuteForUpdate(raw, msg, st, ctx)
 		default:
@@ -1169,7 +1173,7 @@ func (c *client) handleExecuteForUpdate(raw *frame.RawFrame, msg *partialExecute
 }
 
 // handleExecute for delete prepared query
-func (c *client) handleExecuteForDelete(raw *frame.RawFrame, msg *partialExecute, st *translator.DeleteQueryMap, ctx context.Context) {
+func (c *client) handleExecuteForDelete(raw *frame.RawFrame, msg *partialExecute, st *translator.DeleteQueryMap, ctx context.Context, executeOptions utilities.ExecuteOptions) {
 	start := time.Now()
 	var otelErr error
 	var spannerAPI string
@@ -1192,7 +1196,9 @@ func (c *client) handleExecuteForDelete(raw *frame.RawFrame, msg *partialExecute
 	}
 	otelgo.AddAnnotation(ctx, executingSpannerRequestEvent)
 	var result *message.RowsResult
-	if !executeByMutation {
+	if executeOptions.UsePartitionedDml {
+		result, spannerAPI, err = c.proxy.sClient.DeleteUsingPartitionedDML(ctx, *queryMetadata)
+	} else if !executeByMutation {
 		result, spannerAPI, err = c.proxy.sClient.InsertUpdateOrDeleteStatement(ctx, *queryMetadata)
 	} else {
 		result, spannerAPI, err = c.proxy.sClient.DeleteUsingMutations(ctx, *queryMetadata)
@@ -1957,6 +1963,7 @@ var NewSpannerClient = func(ctx context.Context, config Config, ot *otelgo.OpenT
 	if os.Getenv("SPANNER_EMULATOR_HOST") == "" {
 		// Enable multiplexed sessions
 		os.Setenv("GOOGLE_CLOUD_SPANNER_MULTIPLEXED_SESSIONS", "true")
+		os.Setenv("GOOGLE_CLOUD_SPANNER_MULTIPLEXED_SESSIONS_PARTITIONED_OPS", "true")
 	}
 	// Implementation
 	// Configure gRPC connection pool with minimum connection timeout

@@ -81,7 +81,8 @@ const microsecondsThreshold = int64(1e16)
 const nanosecondsThreshold = int64(1e18)
 
 type ExecuteOptions struct {
-	MaxStaleness int64
+	MaxStaleness      int64
+	UsePartitionedDml bool
 }
 
 // FlattenTableName formats the tableName based on the keyspace naming requirement.
