@@ -226,6 +226,10 @@ func (sc *SpannerClient) InsertUpdateOrDeleteStatement(ctx context.Context, quer
 		return nil
 	}, spanner.TransactionOptions{CommitOptions: sc.BuildCommitOptions()})
 
+	if err != nil && strings.Contains(err.Error(), "The transaction contains too many mutations") {
+		_, err = sc.Client.PartitionedUpdate(ctx, *buildStmt(&query))
+	}
+
 	return &rowsResult, ExecuteStreamingSqlAPI, err
 }
 
@@ -564,15 +568,18 @@ func ignoreInsert(iter *spanner.RowIterator) (bool, error) {
 
 func (sc *SpannerClient) DeleteUsingMutations(ctx context.Context, query responsehandler.QueryMetadata) (*message.RowsResult, string, error) {
 	otelgo.AddAnnotation(ctx, DeleteUsingMutations)
+
 	_, err := sc.Client.Apply(ctx,
 		[]*spanner.Mutation{buildDeleteMutation(&query)},
 		spanner.ApplyAtLeastOnce(),
 		spanner.ApplyCommitOptions(sc.BuildCommitOptions()))
-	if err != nil {
-		sc.Logger.Error("Error while Mutation Delete - "+query.Query, zap.Error(err))
-		return nil, CommitAPI, err
-	}
 
+	if err != nil {
+		if strings.Contains(err.Error(), "The transaction contains too many mutations") {
+			_, err = sc.Client.PartitionedUpdate(ctx, *buildStmt(&query))
+		}
+		return &rowsResult, ExecuteStreamingSqlAPI, err
+	}
 	return &rowsResult, CommitAPI, err
 }
 
